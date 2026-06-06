@@ -18,7 +18,7 @@ on:
       runner:
         description: Runner label
         required: true
-        default: "self-hosted"
+        default: "ubuntu-latest"
 
 jobs:
   build:
@@ -54,13 +54,20 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      - name: Show runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+
       - name: Sync OrangeFox
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/ofox-sync"
           git clone https://gitlab.com/OrangeFox/sync.git "$GITHUB_WORKSPACE/ofox-sync/sync"
-          "$GITHUB_WORKSPACE/ofox-sync/sync/orangefox_sync.sh" \
+          cd "$GITHUB_WORKSPACE/ofox-sync/sync"
+          ./orangefox_sync.sh \
             --branch "${{ inputs.branch }}" \
             --path "$GITHUB_WORKSPACE/OrangeFox"
 
