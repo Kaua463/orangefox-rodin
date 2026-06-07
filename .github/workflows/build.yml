@@ -98,16 +98,11 @@ jobs:
             "$GITHUB_WORKSPACE/device-tree/" \
             "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/"
 
-      - name: Verify stock vendor_boot exists
+      - name: Verify prebuilts
         shell: bash
         run: |
           set -euo pipefail
           ls -lh "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/vendor_boot_stock.img"
-
-      - name: Verify vendor ramdisk fragment
-        shell: bash
-        run: |
-          set -euo pipefail
           ls -lh "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/vendor_ramdisk00" || true
 
       - name: Free space
@@ -116,15 +111,6 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/OrangeFox/.repo"
           rm -rf "$GITHUB_WORKSPACE/ofox-sync"
           df -h
-
-      - name: Create swap
-        shell: bash
-        run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
 
       - name: Build OrangeFox
         shell: bash
@@ -144,39 +130,68 @@ jobs:
           set -eo pipefail
           source build/envsetup.sh
           lunch "${{ inputs.lunch }}"
+
           mka -j"${OF_BUILD_JOBS}" adbd "${{ inputs.build_target }}" 2>&1 | tee "$GITHUB_WORKSPACE/orangefox-build.log"
+
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+
+          if [ ! -f "$PRODUCT/vendor_ramdisk_recovery.cpio" ]; then
+            echo "vendor_ramdisk_recovery.cpio not found after vendorbootimage, trying recoveryimage..."
+            mka -j"${OF_BUILD_JOBS}" recoveryimage 2>&1 | tee -a "$GITHUB_WORKSPACE/orangefox-build.log"
+          fi
+
+      - name: Locate recovery ramdisk
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+
+          echo "Listing product output:"
+          find "$PRODUCT" -maxdepth 3 -type f | sort | tee "$GITHUB_WORKSPACE/product_files.txt" || true
+
+          RECOVERY_CPIO=""
+
+          for f in \
+            "$PRODUCT/vendor_ramdisk_recovery.cpio" \
+            "$PRODUCT/obj/PACKAGING/vendor_ramdisk_fragments_intermediates/recovery.cpio.lz4" \
+            "$PRODUCT/obj/PACKAGING/vendor_boot_intermediates/vendor_ramdisk.cpio.lz4" \
+            "$PRODUCT/ramdisk-recovery.img"
+          do
+            if [ -f "$f" ]; then
+              RECOVERY_CPIO="$f"
+              break
+            fi
+          done
+
+          if [ -z "$RECOVERY_CPIO" ]; then
+            echo "::error::No recovery ramdisk found"
+            exit 1
+          fi
+
+          echo "$RECOVERY_CPIO" > "$GITHUB_WORKSPACE/recovery_cpio_path.txt"
+          echo "Using recovery ramdisk: $RECOVERY_CPIO"
+          ls -lh "$RECOVERY_CPIO"
 
       - name: Check original build vendor_boot result
         if: always()
         shell: bash
         run: |
-          if [ -f "$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin/vendor_boot.img" ]; then
-            unpack_bootimg \
-              --boot_img "$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin/vendor_boot.img" \
-              | tee "$GITHUB_WORKSPACE/vendor_boot_info.txt"
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+          if [ -f "$PRODUCT/vendor_boot.img" ]; then
+            unpack_bootimg --boot_img "$PRODUCT/vendor_boot.img" | tee "$GITHUB_WORKSPACE/vendor_boot_info.txt" || true
           fi
 
       - name: Repack stock vendor_boot with OrangeFox recovery
-        if: always()
         shell: bash
         run: |
           set -euo pipefail
 
           PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
           STOCK="$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/vendor_boot_stock.img"
-          RECOVERY_CPIO="$PRODUCT/vendor_ramdisk_recovery.cpio"
+          RECOVERY_CPIO="$(cat "$GITHUB_WORKSPACE/recovery_cpio_path.txt")"
           OUT="$PRODUCT/vendor_boot_patched.img"
           UNPACK="$PRODUCT/stock_vendor_boot"
-
-          if [ ! -f "$STOCK" ]; then
-            echo "::error::Missing stock vendor_boot: $STOCK"
-            exit 1
-          fi
-
-          if [ ! -f "$RECOVERY_CPIO" ]; then
-            echo "::error::Missing OrangeFox recovery cpio: $RECOVERY_CPIO"
-            exit 1
-          fi
 
           rm -rf "$UNPACK"
           mkdir -p "$UNPACK"
@@ -185,7 +200,6 @@ jobs:
 
           RUNNER_MKBOOTIMG="$(command -v mkbootimg)"
           echo "Using mkbootimg: $RUNNER_MKBOOTIMG"
-          mkbootimg --help | head -20 || true
 
           "$RUNNER_MKBOOTIMG" \
             --vendor_boot "$OUT" \
@@ -205,8 +219,10 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
 
-          if [ -d "$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin" ]; then
-            find "$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin" \
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+
+          if [ -d "$PRODUCT" ]; then
+            find "$PRODUCT" \
               -maxdepth 1 \
               -type f \
               \( -name "*.img" -o -name "*.zip" -o -name "*.txt" \) \
@@ -216,6 +232,8 @@ jobs:
           cp -v "$GITHUB_WORKSPACE/orangefox-build.log" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/vendor_boot_info.txt" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt" "$GITHUB_WORKSPACE/artifacts/" || true
+          cp -v "$GITHUB_WORKSPACE/product_files.txt" "$GITHUB_WORKSPACE/artifacts/" || true
+          cp -v "$GITHUB_WORKSPACE/recovery_cpio_path.txt" "$GITHUB_WORKSPACE/artifacts/" || true
 
       - name: Upload artifacts
         if: always()
