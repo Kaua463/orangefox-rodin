@@ -146,6 +146,19 @@ jobs:
 
           find "$PRODUCT" -maxdepth 4 -type f | sort | tee "$GITHUB_WORKSPACE/product_files.txt" || true
 
+          # Prefer the natively-built vendor_boot.img (mka vendorbootimage uses
+          # AOSP core Makefile's own BOARD_VENDOR_RAMDISK_FRAGMENTS assembly,
+          # which correctly embeds the recovery ramdisk for header_version 4 /
+          # BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT devices like ours.
+          # OrangeFox's own recoveryimage/AIK repacking path assumes a
+          # standalone recovery.img base to unpack, which this device doesn't
+          # have, and fails silently partway through).
+          if [ -f "$PRODUCT/vendor_boot.img" ]; then
+            echo "native" > "$GITHUB_WORKSPACE/repack_mode.txt"
+            ls -lh "$PRODUCT/vendor_boot.img"
+            exit 0
+          fi
+
           RECOVERY_CPIO=""
 
           for f in \
@@ -161,14 +174,16 @@ jobs:
           done
 
           if [ -z "$RECOVERY_CPIO" ]; then
-            echo "::error::No recovery ramdisk found"
+            echo "::error::No recovery ramdisk found (neither vendor_boot.img nor a recovery cpio/ramdisk)"
             exit 1
           fi
 
+          echo "manual" > "$GITHUB_WORKSPACE/repack_mode.txt"
           echo "$RECOVERY_CPIO" > "$GITHUB_WORKSPACE/recovery_cpio_path.txt"
           ls -lh "$RECOVERY_CPIO"
 
       - name: Repack stock vendor_boot with OrangeFox recovery
+        if: hashFiles('recovery_cpio_path.txt') != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -198,6 +213,19 @@ jobs:
 
           unpack_bootimg --boot_img "$OUT" | tee "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt"
 
+      - name: Stage native vendor_boot.img as patched output
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+          if [ -f "$GITHUB_WORKSPACE/repack_mode.txt" ] && \
+             [ "$(cat "$GITHUB_WORKSPACE/repack_mode.txt")" = "native" ] && \
+             [ -f "$PRODUCT/vendor_boot.img" ]; then
+            cp -v "$PRODUCT/vendor_boot.img" "$PRODUCT/vendor_boot_patched.img"
+            unpack_bootimg --boot_img "$PRODUCT/vendor_boot_patched.img" | tee "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt"
+          fi
+
       - name: Collect artifacts
         if: always()
         shell: bash
@@ -217,6 +245,7 @@ jobs:
           cp -v "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/product_files.txt" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/recovery_cpio_path.txt" "$GITHUB_WORKSPACE/artifacts/" || true
+          cp -v "$GITHUB_WORKSPACE/repack_mode.txt" "$GITHUB_WORKSPACE/artifacts/" || true
 
       - name: Upload artifacts
         if: always()
