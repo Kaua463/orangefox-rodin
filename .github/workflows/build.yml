@@ -123,11 +123,11 @@ jobs:
           FOX_VIRTUAL_AB_DEVICE: "1"
           OF_FORCE_PREBUILT_KERNEL: "1"
           OF_LOW_MEMORY_BUILD: "1"
-          OF_BUILD_JOBS: "1"
-          NINJA_ARGS: "-j1 -l1"
-          SOONG_UI_NINJA_ARGS: "-j1 -l1"
+          OF_BUILD_JOBS: "${{ inputs.build_jobs }}"
+          NINJA_ARGS: "-j${{ inputs.build_jobs }}"
+          SOONG_UI_NINJA_ARGS: "-j${{ inputs.build_jobs }}"
           USE_CCACHE: "0"
-          GOMAXPROCS: "1"
+          GOMAXPROCS: "${{ inputs.build_jobs }}"
           GOGC: "20"
           GOMEMLIMIT: "3GiB"
           _JAVA_OPTIONS: "-Xmx3g"
@@ -135,7 +135,7 @@ jobs:
           set -eo pipefail
           source build/envsetup.sh
           lunch "${{ inputs.lunch }}"
-          mka -j1 adbd "${{ inputs.build_target }}" 2>&1 | tee "$GITHUB_WORKSPACE/orangefox-build.log"
+          mka -j"${{ inputs.build_jobs }}" adbd "${{ inputs.build_target }}" 2>&1 | tee "$GITHUB_WORKSPACE/orangefox-build.log"
 
       - name: Locate recovery ramdisk
         if: always()
