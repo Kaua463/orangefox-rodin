@@ -113,6 +113,22 @@ jobs:
           df -h
           free -h
 
+      - name: Add build swap
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Two prior runs (author's -j1 attempts and our -j3 attempt) both
+          # died with "runner has received a shutdown signal" at the exact
+          # same point: right after soong_build finishes compiling itself,
+          # entering the Android.bp module-graph analysis phase. That phase
+          # is memory-hungry and this runner only has 15GB RAM + 3GB swap.
+          # README recommends exactly this for 16GB machines.
+          sudo fallocate -l 16G /swap-build.img
+          sudo chmod 600 /swap-build.img
+          sudo mkswap /swap-build.img
+          sudo swapon /swap-build.img
+          free -h
+
       - name: Build OrangeFox
         shell: bash
         working-directory: ${{ github.workspace }}/OrangeFox
