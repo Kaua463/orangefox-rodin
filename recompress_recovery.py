@@ -17,7 +17,8 @@ import subprocess
 import shlex
 import os
 
-unpack_dir, out_img, mkbootimg_bin = sys.argv[1], sys.argv[2], sys.argv[3]
+unpack_dir, out_img, mkbootimg_bin, avbtool_bin, fingerprint_file = (
+    sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
 args = shlex.split(open(os.path.join(unpack_dir, "mkbootimg_args.txt")).read())
 
 # Find the --vendor_ramdisk_fragment path in the option group that has
@@ -59,3 +60,23 @@ args[recovery_frag_idx] = xz_path
 cmd = [mkbootimg_bin] + args + ["--vendor_boot", out_img]
 print("running:", " ".join(shlex.quote(c) for c in cmd))
 subprocess.run(cmd, check=True)
+
+# The native ninja recipe's chain is: mkbootimg && size-check && avbtool
+# add_hash_footer && OrangeFox hook. Our size check always failed before
+# avbtool ran, so no build in this whole investigation has ever actually
+# added the AVB hash footer -- do it now so this image matches what a
+# passing native build would have produced (BOARD_AVB_ENABLE=true).
+partition_size = 67108864
+fingerprint = open(fingerprint_file).read().strip()
+avb_cmd = [
+    avbtool_bin, "add_hash_footer",
+    "--image", out_img,
+    "--partition_size", str(partition_size),
+    "--partition_name", "vendor_boot",
+    "--prop", f"com.android.build.vendor_boot.fingerprint:{fingerprint}",
+]
+print("running:", " ".join(shlex.quote(c) for c in avb_cmd))
+subprocess.run(avb_cmd, check=True)
+
+final_size = os.path.getsize(out_img)
+print(f"final vendor_boot_patched.img (with AVB footer): {final_size:,} bytes")

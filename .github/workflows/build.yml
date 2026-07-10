@@ -219,9 +219,11 @@ jobs:
           # archive" (confirmed working -- it's the same binary that built the
           # oversized vendor_boot.img moments earlier in this same job).
           MKBOOTIMG_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/mkbootimg"
+          AVBTOOL_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/avbtool"
+          FINGERPRINT_FILE="$PRODUCT/build_fingerprint.txt"
 
           python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
-            "$UNPACK" "$OUT" "$MKBOOTIMG_BIN"
+            "$UNPACK" "$OUT" "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE"
 
           ls -lh "$OUT"
           SIZE=$(stat -c%s "$OUT")
