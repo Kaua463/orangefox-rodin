@@ -35,6 +35,20 @@ jobs:
         with:
           path: device-tree
 
+      - name: Free disk space (remove unused preinstalled toolchains)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The 25209-action build ate through the runner's disk in ~5min
+          # during peak compile (63G free -> 15G free) and died with ENOSPC
+          # at 51% done. GH-hosted runners ship ~30-40GB of toolchains we
+          # never use for an AOSP-style source build (repo/git bring our own
+          # toolchain) — reclaim it before we need it.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /opt/az 2>/dev/null || true
+          df -h
+
       - name: Install host packages
         shell: bash
         run: |
