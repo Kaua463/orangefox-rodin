@@ -43,6 +43,28 @@ everything else directly from `prebuilt/vendor_boot_stock.img` (which
 should be kept up to date -- see README) via `unpack_bootimg --format
 mkbootimg`, which gives the exact reconstruction argument list already
 matching whatever's really flashed.
+
+3rd attempt: the above (zstd recovery fragment, stock-sourced platform
+fragment/dtb/addresses/table) fixed the structural bug -- confirmed via
+two independent builds (local + fresh CI compile) producing byte-identical
+platform ramdisk/dtb and a correct 2-fragment table -- but flashing it
+produced a NEW failure mode: normal boot worked fine, but entering
+recovery (`fastboot reboot recovery` or the volume-up key combo) hung at
+the bootloader logo, before the kernel ever got control. Root cause per
+AOSP's own vendor_boot docs (source.android.com/docs/core/architecture/
+partitions/vendor-boot-partitions): fragments that get concatenated
+together (PLATFORM + RECOVERY, for the recovery-boot path) are decompressed
+as ONE combined stream, so they must share the same compression format.
+The stock platform fragment is lz4; we'd left it untouched while recompressing
+only the recovery fragment as zstd -- so normal boot (platform fragment
+alone, no concatenation) worked, but recovery boot (platform+recovery
+concatenated, mismatched lz4/zstd) hung.
+
+Fix: recompress BOTH fragments as zstd, not just recovery, so whatever
+gets concatenated is internally consistent. Bonus: platform compresses
+much better under zstd too (29.3MB lz4 -> 17.4MB zstd), so the combined
+total (~47.9MB) comfortably fits the ~66.7MB combined budget with zero
+content cuts to either fragment.
 """
 import sys
 import subprocess
@@ -113,6 +135,29 @@ for i, a in enumerate(args):
         break
 assert recovery_frag_idx is not None, \
     "stock vendor_boot.img has no 'recovery' ramdisk_name fragment to replace"
+
+# 3b. Recompress the STOCK platform fragment as zstd too (it ships as lz4).
+# Fragments that get concatenated at boot (platform+recovery, for the
+# recovery-boot path) are decompressed as a single stream, so both must
+# share one compression format -- see docstring above (3rd attempt).
+platform_frag_idx = None
+for i, a in enumerate(args):
+    if a == "--vendor_ramdisk_fragment" and i + 1 != recovery_frag_idx:
+        platform_frag_idx = i + 1
+        break
+assert platform_frag_idx is not None, \
+    "stock vendor_boot.img has no platform vendor_ramdisk_fragment to replace"
+
+platform_lz4 = args[platform_frag_idx]
+platform_raw = os.path.join(work_dir, "platform.raw.cpio")
+platform_zst = os.path.join(work_dir, "platform.zst")
+run(["lz4", "-d", "-f", platform_lz4, platform_raw])
+run(["zstd", "-19", "--zstd=wlog=23", "-T0", "-f", platform_raw, "-o", platform_zst])
+p_before = os.path.getsize(platform_lz4)
+p_after = os.path.getsize(platform_zst)
+print(f"platform fragment: {p_before:,} bytes (lz4) -> {p_after:,} bytes (zstd), "
+      f"saved {p_before - p_after:,} bytes")
+args[platform_frag_idx] = platform_zst
 args[recovery_frag_idx] = recovery_zst
 
 cmd = [mkbootimg_bin] + args + ["--vendor_boot", out_img]
