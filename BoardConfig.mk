@@ -106,8 +106,11 @@ TW_INCLUDE_FBE_METADATA_DECRYPT := true
 TW_USE_FSCRYPT_POLICY := 2
 TW_INCLUDE_FASTBOOTD := true
 TW_INCLUDE_LPTOOLS := true
-TW_INCLUDE_LPDUMP := true
-TW_INCLUDE_REPACKTOOLS := true
+# Dropped to close the vendor_boot.img size overage (79474688 > 67108864
+# bytes, ~11.6MB over). Neither is needed for normal flash/backup/restore
+# use; lptools (kept) covers dynamic-partition resizing.
+TW_INCLUDE_LPDUMP := false
+TW_INCLUDE_REPACKTOOLS := false
 TW_INCLUDE_RESETPROP := true
 TW_INCLUDE_EROFS := true
 TW_HAS_MTP := true
@@ -115,5 +118,7 @@ TW_MTP_DEVICE := /dev/mtp_usb
 TW_NO_USB_STORAGE := true
 RECOVERY_SDCARD_ON_DATA := true
 BOARD_HAS_LARGE_FILESYSTEM := true
+TW_EXTRA_LANGUAGES :=
+TW_EXCLUDE_TZDATA := true
 
 -include $(DEVICE_PATH)/fox_rodin.mk
