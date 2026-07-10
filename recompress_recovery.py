@@ -47,12 +47,14 @@ print(f"recovery fragment: {before:,} bytes (lz4) -> {after:,} bytes (xz), "
 
 args[recovery_frag_idx] = xz_path
 
-# unpack_bootimg's mkbootimg-format output hardcodes --base 0x00000000 (it
-# does not preserve the real base address) -- fix it back to our known
-# stock value.
-for i, a in enumerate(args):
-    if a == "--base":
-        args[i + 1] = "0x40000000"
+# NOTE: unpack_bootimg's mkbootimg-format output sets --base 0x00000000
+# *by design* and folds the real base into --kernel_offset/--ramdisk_offset/
+# --tags_offset/--dtb_offset directly (mkbootimg computes final address =
+# base + offset, so base=0 + absolute-address-as-offset is mathematically
+# equivalent to the original build's base=0x40000000 + small relative
+# offsets -- verified: 0x40000000+0x8000=0x40008000 matches the unpacked
+# kernel_offset value exactly). Do NOT override --base here -- that would
+# double-count it into a wrong (silently corrupted) load address.
 
 cmd = [mkbootimg_bin] + args + ["--vendor_boot", out_img]
 print("running:", " ".join(shlex.quote(c) for c in cmd))
