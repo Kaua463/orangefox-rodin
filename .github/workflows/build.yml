@@ -176,85 +176,55 @@ jobs:
 
           find "$PRODUCT" -maxdepth 4 -type f | sort | tee "$GITHUB_WORKSPACE/product_files.txt" || true
 
-          # Prefer the natively-built vendor_boot.img (mka vendorbootimage uses
-          # AOSP core Makefile's own BOARD_VENDOR_RAMDISK_FRAGMENTS assembly,
-          # which correctly embeds the recovery ramdisk for header_version 4 /
-          # BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT devices like ours.
-          # OrangeFox's own recoveryimage/AIK repacking path assumes a
-          # standalone recovery.img base to unpack, which this device doesn't
-          # have, and fails silently partway through).
-          if [ -f "$PRODUCT/vendor_boot.img" ]; then
-            echo "native" > "$GITHUB_WORKSPACE/repack_mode.txt"
-            ls -lh "$PRODUCT/vendor_boot.img"
-            exit 0
-          fi
-
-          RECOVERY_CPIO=""
-
-          for f in \
-            "$PRODUCT/vendor_ramdisk_recovery.cpio" \
-            "$PRODUCT/obj/PACKAGING/vendor_ramdisk_fragments_intermediates/recovery.cpio.lz4" \
-            "$PRODUCT/obj/PACKAGING/vendor_boot_intermediates/vendor_ramdisk.cpio.lz4" \
-            "$PRODUCT/ramdisk-recovery.img"
-          do
-            if [ -f "$f" ]; then
-              RECOVERY_CPIO="$f"
-              break
-            fi
-          done
-
-          if [ -z "$RECOVERY_CPIO" ]; then
-            echo "::error::No recovery ramdisk found (neither vendor_boot.img nor a recovery cpio/ramdisk)"
+          if [ ! -f "$PRODUCT/vendor_boot.img" ]; then
+            echo "::error::No vendor_boot.img found (native vendorbootimage build did not produce one)"
             exit 1
           fi
+          ls -lh "$PRODUCT/vendor_boot.img"
 
-          echo "manual" > "$GITHUB_WORKSPACE/repack_mode.txt"
-          echo "$RECOVERY_CPIO" > "$GITHUB_WORKSPACE/recovery_cpio_path.txt"
-          ls -lh "$RECOVERY_CPIO"
-
-      - name: Repack stock vendor_boot with OrangeFox recovery
-        if: hashFiles('recovery_cpio_path.txt') != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
-          STOCK="$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/vendor_boot_stock.img"
-          RECOVERY_CPIO="$(cat "$GITHUB_WORKSPACE/recovery_cpio_path.txt")"
-          OUT="$PRODUCT/vendor_boot_patched.img"
-          UNPACK="$PRODUCT/stock_vendor_boot"
-
-          rm -rf "$UNPACK"
-          mkdir -p "$UNPACK"
-
-          unpack_bootimg --boot_img "$STOCK" --out "$UNPACK"
-
-          RUNNER_MKBOOTIMG="$(command -v mkbootimg)"
-
-          "$RUNNER_MKBOOTIMG" \
-            --vendor_boot "$OUT" \
-            --header_version 4 \
-            --pagesize 4096 \
-            --base 0x40000000 \
-            --vendor_cmdline "bootopt=64S3,32N2,64N2 erofs.reserved_pages=64" \
-            --vendor_ramdisk "$UNPACK/vendor_ramdisk00" \
-            --dtb "$UNPACK/dtb" \
-            --vendor_bootconfig "$UNPACK/bootconfig"
-
-          unpack_bootimg --boot_img "$OUT" | tee "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt"
-
-      - name: Stage native vendor_boot.img as patched output
+      # The native `mka vendorbootimage` build (AOSP core Makefile's own
+      # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) correctly embeds the
+      # compiled recovery ramdisk, but ninja's own size check rejects the
+      # result: 79380480 bytes vs the real 67108864-byte partition. Root
+      # cause (confirmed by manually extracting+parsing the fragment on a
+      # local machine): the recovery fragment (~47.5MB) is lz4-compressed
+      # (confirmed: matches `lz4 -12` byte-for-byte), but lz4 only achieves
+      # ~36% ratio on this content. xz -9 achieves ~17.5% on the SAME
+      # decompressed bytes (measured locally: 138053888 raw -> 49704536
+      # lz4 vs 24225088 xz) — more than half the size, for free, zero
+      # content change. mkbootimg is compression-agnostic per fragment
+      # (system/tools/mkbootimg just concatenates raw bytes per the vendor
+      # ramdisk table; the kernel's initramfs unpacker auto-detects
+      # gzip/lzma/xz/lz4/zstd by magic bytes at boot). The stock platform
+      # fragment is left completely untouched.
+      - name: Recompress recovery ramdisk fragment with xz and repack
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
-          if [ -f "$GITHUB_WORKSPACE/repack_mode.txt" ] && \
-             [ "$(cat "$GITHUB_WORKSPACE/repack_mode.txt")" = "native" ] && \
-             [ -f "$PRODUCT/vendor_boot.img" ]; then
-            cp -v "$PRODUCT/vendor_boot.img" "$PRODUCT/vendor_boot_patched.img"
-            unpack_bootimg --boot_img "$PRODUCT/vendor_boot_patched.img" | tee "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt"
+          UNPACK="$PRODUCT/vendor_boot_unpack"
+          OUT="$PRODUCT/vendor_boot_patched.img"
+
+          rm -rf "$UNPACK"
+          mkdir -p "$UNPACK"
+
+          unpack_bootimg --boot_img "$PRODUCT/vendor_boot.img" --out "$UNPACK" \
+            --format mkbootimg > "$UNPACK/mkbootimg_args.txt"
+
+          python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
+            "$UNPACK" "$OUT"
+
+          ls -lh "$OUT"
+          SIZE=$(stat -c%s "$OUT")
+          MAX=67108864
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "::error::vendor_boot_patched.img still too large ($SIZE > $MAX)"
+            exit 1
           fi
+          echo "vendor_boot_patched.img fits: $SIZE <= $MAX"
+
+          unpack_bootimg --boot_img "$OUT" | tee "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt"
 
       - name: Collect artifacts
         if: always()
@@ -274,8 +244,7 @@ jobs:
           cp -v "$GITHUB_WORKSPACE/orangefox-build.log" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/vendor_boot_patched_info.txt" "$GITHUB_WORKSPACE/artifacts/" || true
           cp -v "$GITHUB_WORKSPACE/product_files.txt" "$GITHUB_WORKSPACE/artifacts/" || true
-          cp -v "$GITHUB_WORKSPACE/recovery_cpio_path.txt" "$GITHUB_WORKSPACE/artifacts/" || true
-          cp -v "$GITHUB_WORKSPACE/repack_mode.txt" "$GITHUB_WORKSPACE/artifacts/" || true
+          cp -v "$PRODUCT/vendor_boot_unpack/mkbootimg_args.txt" "$GITHUB_WORKSPACE/artifacts/" || true
 
       - name: Upload artifacts
         if: always()

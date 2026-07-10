@@ -35,13 +35,6 @@ BOARD_INCLUDE_DTB_IN_BOOTIMG := true
 BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/dtbo.img
 BOARD_PREBUILT_DTBIMAGE_DIR := $(DEVICE_PATH)/prebuilt/dtb
 
-# The recovery vendor_ramdisk_fragment came out as a RAW, UNCOMPRESSED cpio
-# despite AOSP naming the intermediate "*.lz4" (confirmed by manually
-# extracting and parsing the fragment: cpio newc header found directly, no
-# lz4 frame). This is the real reason vendor_boot.img blew the 64MB budget
-# (recovery fragment alone = 49.5-49.7MB raw). Force real lz4 compression.
-BOARD_RAMDISK_USE_LZ4 := true
-
 BOARD_BOOTIMAGE_PARTITION_SIZE := 67108864
 BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864
 BOARD_INIT_BOOT_IMAGE_PARTITION_SIZE := 8388608
