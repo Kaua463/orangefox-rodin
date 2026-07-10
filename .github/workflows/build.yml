@@ -183,54 +183,59 @@ jobs:
           ls -lh "$PRODUCT/vendor_boot.img"
 
       # The native `mka vendorbootimage` build (AOSP core Makefile's own
-      # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) correctly embeds the
-      # compiled recovery ramdisk, but ninja's own size check rejects the
-      # result: 79380480 bytes vs the real 67108864-byte partition. Root
-      # cause: the recovery fragment (~47.5MB) is lz4-compressed at only
-      # ~36% ratio on this content.
+      # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) compiles the recovery
+      # ramdisk correctly, but its OWN vendor_boot.img output has proven
+      # unreliable in three separate, independent ways across three real
+      # bootloop failures on the physical device:
+      #   1. Size: 79380480 vs the real 67108864-byte partition (lz4 only
+      #      gets ~36% ratio on this content).
+      #   2. Compression format: first fix used xz (~17.5% ratio) and
+      #      bootlooped -- the device kernel's actual config (verified via
+      #      `adb shell su 0 -c "zcat /proc/config.gz"`) has CONFIG_RD_XZ
+      #      NOT SET, only CONFIG_RD_GZIP/CONFIG_RD_LZ4/CONFIG_RD_ZSTD.
+      #   3. Structure: switched to zstd (kernel-supported, verified) and
+      #      bootlooped AGAIN. Diffing the full vendor_ramdisk_table
+      #      against a live backup of the device's actual vendor_boot_a
+      #      (`adb shell su 0 -c "cat /dev/block/by-name/vendor_boot_a"`)
+      #      found the native build tags an essentially-empty 4-byte
+      #      fragment as type=PLATFORM while the real 29MB platform
+      #      ramdisk content ends up tagged type=NONE -- the boot process
+      #      looks for platform content in the PLATFORM slot and finds
+      #      nothing. Also found this device tree's prebuilt/vendor_ramdisk00
+      #      and prebuilt/dtb were BOTH byte-different from what's actually
+      #      flashed (the device received an OTA after those prebuilts were
+      #      extracted).
       #
-      # FIRST FIX ATTEMPT used xz -9 (~17.5% ratio) and BOOTLOOPED the real
-      # device: its kernel config (verified live via `adb shell su 0 -c
-      # "zcat /proc/config.gz"`) has CONFIG_RD_XZ NOT SET, only
-      # CONFIG_RD_GZIP/CONFIG_RD_LZ4/CONFIG_RD_ZSTD. mkbootimg itself is
-      # compression-agnostic (just concatenates raw fragment bytes per the
-      # vendor ramdisk table) but the KERNEL's initramfs decompressor only
-      # supports whatever CONFIG_RD_* it was actually built with -- always
-      # verify /proc/config.gz on the real device before picking a
-      # compression format, don't assume "auto-detects everything".
-      #
-      # Now uses zstd (CONFIG_RD_ZSTD=y confirmed), -19 with explicit
-      # --zstd=wlog=23 (8MiB window, pinned to stay under
-      # lib/decompress_unzstd.c's ZSTD_WINDOWSIZE_MAX check). ~22% ratio --
-      # between lz4 and xz, but actually supported. The stock platform
-      # fragment is left completely untouched either way.
-      - name: Recompress recovery ramdisk fragment with zstd and repack
+      # Given the native build's own field-by-field output failed three
+      # independent verifications, recompress_recovery.py now treats
+      # prebuilt/vendor_boot_stock.img (kept up to date -- see README) as
+      # the complete source of truth for everything (platform ramdisk, dtb,
+      # load addresses, cmdline, vendor_ramdisk_table structure) and pulls
+      # ONLY the compiled recovery ramdisk content from the native build,
+      # recompressing it with zstd (-19, --zstd=wlog=23 / 8MiB window,
+      # pinned to stay under lib/decompress_unzstd.c's window-size check).
+      - name: Rebuild vendor_boot from stock + recompressed recovery ramdisk
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
-          UNPACK="$PRODUCT/vendor_boot_unpack"
+          STOCK="$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/vendor_boot_stock.img"
           OUT="$PRODUCT/vendor_boot_patched.img"
-
-          rm -rf "$UNPACK"
-          mkdir -p "$UNPACK"
-
-          unpack_bootimg --boot_img "$PRODUCT/vendor_boot.img" --out "$UNPACK" \
-            --format mkbootimg > "$UNPACK/mkbootimg_args.txt"
 
           # The apt-packaged /usr/bin/mkbootimg is broken (ModuleNotFoundError:
           # No module named 'gki' -- its generate_gki_certificate import isn't
-          # satisfied by the Debian package layout). Use the one OrangeFox's
-          # own build already compiled as a self-contained "embedded python
-          # archive" (confirmed working -- it's the same binary that built the
-          # oversized vendor_boot.img moments earlier in this same job).
+          # satisfied by the Debian package layout). Use the ones OrangeFox's
+          # own build already compiled as self-contained "embedded python
+          # archives" instead (confirmed working). unpack_bootimg from apt is
+          # fine (never hit that import).
           MKBOOTIMG_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/mkbootimg"
           AVBTOOL_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/avbtool"
           FINGERPRINT_FILE="$PRODUCT/build_fingerprint.txt"
 
           python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
-            "$UNPACK" "$OUT" "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE"
+            "$PRODUCT/vendor_boot.img" "$STOCK" "$OUT" \
+            unpack_bootimg "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE"
 
           ls -lh "$OUT"
           SIZE=$(stat -c%s "$OUT")
