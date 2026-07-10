@@ -51,11 +51,35 @@ args[recovery_frag_idx] = xz_path
 # NOTE: unpack_bootimg's mkbootimg-format output sets --base 0x00000000
 # *by design* and folds the real base into --kernel_offset/--ramdisk_offset/
 # --tags_offset/--dtb_offset directly (mkbootimg computes final address =
-# base + offset, so base=0 + absolute-address-as-offset is mathematically
-# equivalent to the original build's base=0x40000000 + small relative
-# offsets -- verified: 0x40000000+0x8000=0x40008000 matches the unpacked
-# kernel_offset value exactly). Do NOT override --base here -- that would
-# double-count it into a wrong (silently corrupted) load address.
+# base + offset). Do NOT override --base -- that would double-count it.
+#
+# BUT: the native `mka vendorbootimage` ninja recipe never passes
+# --kernel_offset/--ramdisk_offset/--tags_offset/--dtb_offset at all (only
+# --base/--pagesize/--header_version/--dtb), so it silently falls back to
+# mkbootimg's built-in defaults (0x8000/0x1000000/0x100/0x1f00000) instead
+# of BoardConfig.mk's own BOARD_RAMDISK_OFFSET=0x26f00000 /
+# BOARD_KERNEL_TAGS_OFFSET=0x07c80000 / BOARD_DTB_OFFSET=0x07c80000. That
+# BoardConfig-declared vendorbootimage target apparently doesn't wire those
+# variables in at all. Confirmed by pulling the REAL vendor_boot_a off the
+# device (`adb shell su 0 -c "cat /dev/block/by-name/vendor_boot_a"`) and
+# comparing: real device has kernel load=0x40000000 (offset 0), ramdisk
+# load=0x66f00000 (= base+0x26f00000), tags/dtb load=0x47c80000 (=
+# base+0x07c80000), and a non-empty vendor_cmdline -- none of which matched
+# our native build's output. Force the correct absolute addresses (base is
+# folded to 0 in this unpacked-args representation, so these ARE the final
+# addresses) and restore the vendor_cmdline BoardConfig.mk declares.
+CORRECT_OFFSETS = {
+    "--kernel_offset": "0x40000000",   # base 0x40000000 + BOARD_KERNEL_BASE-relative 0 (no separate kernel offset)
+    "--ramdisk_offset": "0x66f00000",  # base 0x40000000 + BOARD_RAMDISK_OFFSET 0x26f00000
+    "--tags_offset": "0x47c80000",     # base 0x40000000 + BOARD_KERNEL_TAGS_OFFSET 0x07c80000
+    "--dtb_offset": "0x47c80000",      # base 0x40000000 + BOARD_DTB_OFFSET 0x07c80000
+}
+CORRECT_CMDLINE = "bootopt=64S3,32N2,64N2 erofs.reserved_pages=64"
+for i, a in enumerate(args):
+    if a in CORRECT_OFFSETS:
+        args[i + 1] = CORRECT_OFFSETS[a]
+    elif a == "--vendor_cmdline":
+        args[i + 1] = CORRECT_CMDLINE
 
 cmd = [mkbootimg_bin] + args + ["--vendor_boot", out_img]
 print("running:", " ".join(shlex.quote(c) for c in cmd))
