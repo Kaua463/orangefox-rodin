@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
-"""Recompress the recovery vendor_ramdisk_fragment with xz and rebuild
+"""Recompress the recovery vendor_ramdisk_fragment with zstd and rebuild
 vendor_boot.img.
 
 Root cause of the 79380480 > 67108864 byte size overage: the native
 `mka vendorbootimage` build embeds the recovery ramdisk correctly, but the
 fragment is lz4-compressed at only ~36% ratio (measured: 138053888 raw ->
-49704536 lz4). xz -9 on the SAME decompressed bytes gets ~17.5% (24225088),
-more than half the size, for free -- no content change. mkbootimg is
-compression-agnostic per fragment (system/tools/mkbootimg just concatenates
-raw bytes per the vendor ramdisk table); the kernel's initramfs unpacker
-auto-detects gzip/lzma/xz/lz4/zstd by magic bytes at boot. The stock
-platform fragment is left completely untouched.
+49704536 lz4).
+
+FIRST ATTEMPT USED xz -9 (24225088 bytes, ~17.5% ratio) and this BOOTLOOPED
+on the real device. Root cause: the device kernel's actual config (pulled
+live via `adb shell su 0 -c "zcat /proc/config.gz"`) has CONFIG_RD_XZ NOT
+SET -- only CONFIG_RD_GZIP/CONFIG_RD_LZ4/CONFIG_RD_ZSTD. mkbootimg is
+compression-agnostic at the packaging level (system/tools/mkbootimg just
+concatenates raw bytes per the vendor ramdisk table) but the KERNEL'S
+initramfs decompressor only supports whatever CONFIG_RD_* options it was
+actually built with -- "auto-detects by magic bytes" is true only among
+the compiled-in decompressors, not universally. Always verify
+/proc/config.gz on the real device before picking a compression format.
+
+Now uses zstd instead: -19 with an explicit --zstd=wlog=23 (8MiB window).
+zstd's default window for this input size is already 8MiB, but wlog=23 is
+pinned explicitly to stay under lib/decompress_unzstd.c's window-size
+check regardless of zstd CLI version drift (the kernel decompressor
+rejects any frame whose header window size exceeds what it's willing to
+allocate). Measured: 138053888 raw -> 30505922 zstd (~22% ratio) --
+between lz4 and xz, but SUPPORTED (CONFIG_RD_ZSTD=y on this device).
+The stock platform fragment is left completely untouched either way.
 """
 import sys
 import subprocess
@@ -36,17 +51,18 @@ assert recovery_frag_idx is not None, \
 
 recovery_path = args[recovery_frag_idx]
 raw_path = recovery_path + ".raw"
-xz_path = recovery_path + ".xz"
+zst_path = recovery_path + ".zst"
 
 before = os.path.getsize(recovery_path)
 subprocess.run(["lz4", "-d", "-f", recovery_path, raw_path], check=True)
-subprocess.run(["xz", "-9", "-T0", "-f", "-k", raw_path], check=True)
-os.replace(raw_path + ".xz", xz_path)
-after = os.path.getsize(xz_path)
-print(f"recovery fragment: {before:,} bytes (lz4) -> {after:,} bytes (xz), "
+subprocess.run(
+    ["zstd", "-19", "--zstd=wlog=23", "-T0", "-f", raw_path, "-o", zst_path],
+    check=True)
+after = os.path.getsize(zst_path)
+print(f"recovery fragment: {before:,} bytes (lz4) -> {after:,} bytes (zstd), "
       f"saved {before - after:,} bytes")
 
-args[recovery_frag_idx] = xz_path
+args[recovery_frag_idx] = zst_path
 
 # NOTE: unpack_bootimg's mkbootimg-format output sets --base 0x00000000
 # *by design* and folds the real base into --kernel_offset/--ramdisk_offset/

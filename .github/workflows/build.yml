@@ -58,7 +58,7 @@ jobs:
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
             git gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
             lib32z1-dev libelf-dev liblz4-tool libncurses-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lz4 pngcrush rsync schedtool \
+            libssl-dev libxml2 libxml2-utils lz4 zstd pngcrush rsync schedtool \
             squashfs-tools unzip xsltproc zip zlib1g-dev mkbootimg
 
       - name: Install repo tool
@@ -186,18 +186,25 @@ jobs:
       # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) correctly embeds the
       # compiled recovery ramdisk, but ninja's own size check rejects the
       # result: 79380480 bytes vs the real 67108864-byte partition. Root
-      # cause (confirmed by manually extracting+parsing the fragment on a
-      # local machine): the recovery fragment (~47.5MB) is lz4-compressed
-      # (confirmed: matches `lz4 -12` byte-for-byte), but lz4 only achieves
-      # ~36% ratio on this content. xz -9 achieves ~17.5% on the SAME
-      # decompressed bytes (measured locally: 138053888 raw -> 49704536
-      # lz4 vs 24225088 xz) — more than half the size, for free, zero
-      # content change. mkbootimg is compression-agnostic per fragment
-      # (system/tools/mkbootimg just concatenates raw bytes per the vendor
-      # ramdisk table; the kernel's initramfs unpacker auto-detects
-      # gzip/lzma/xz/lz4/zstd by magic bytes at boot). The stock platform
-      # fragment is left completely untouched.
-      - name: Recompress recovery ramdisk fragment with xz and repack
+      # cause: the recovery fragment (~47.5MB) is lz4-compressed at only
+      # ~36% ratio on this content.
+      #
+      # FIRST FIX ATTEMPT used xz -9 (~17.5% ratio) and BOOTLOOPED the real
+      # device: its kernel config (verified live via `adb shell su 0 -c
+      # "zcat /proc/config.gz"`) has CONFIG_RD_XZ NOT SET, only
+      # CONFIG_RD_GZIP/CONFIG_RD_LZ4/CONFIG_RD_ZSTD. mkbootimg itself is
+      # compression-agnostic (just concatenates raw fragment bytes per the
+      # vendor ramdisk table) but the KERNEL's initramfs decompressor only
+      # supports whatever CONFIG_RD_* it was actually built with -- always
+      # verify /proc/config.gz on the real device before picking a
+      # compression format, don't assume "auto-detects everything".
+      #
+      # Now uses zstd (CONFIG_RD_ZSTD=y confirmed), -19 with explicit
+      # --zstd=wlog=23 (8MiB window, pinned to stay under
+      # lib/decompress_unzstd.c's ZSTD_WINDOWSIZE_MAX check). ~22% ratio --
+      # between lz4 and xz, but actually supported. The stock platform
+      # fragment is left completely untouched either way.
+      - name: Recompress recovery ramdisk fragment with zstd and repack
         if: always()
         shell: bash
         run: |
