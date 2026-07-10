@@ -17,7 +17,7 @@ import subprocess
 import shlex
 import os
 
-unpack_dir, out_img = sys.argv[1], sys.argv[2]
+unpack_dir, out_img, mkbootimg_bin = sys.argv[1], sys.argv[2], sys.argv[3]
 args = shlex.split(open(os.path.join(unpack_dir, "mkbootimg_args.txt")).read())
 
 # Find the --vendor_ramdisk_fragment path in the option group that has
@@ -54,6 +54,6 @@ for i, a in enumerate(args):
     if a == "--base":
         args[i + 1] = "0x40000000"
 
-cmd = ["mkbootimg"] + args + ["--vendor_boot", out_img]
+cmd = [mkbootimg_bin] + args + ["--vendor_boot", out_img]
 print("running:", " ".join(shlex.quote(c) for c in cmd))
 subprocess.run(cmd, check=True)

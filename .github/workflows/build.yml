@@ -212,8 +212,16 @@ jobs:
           unpack_bootimg --boot_img "$PRODUCT/vendor_boot.img" --out "$UNPACK" \
             --format mkbootimg > "$UNPACK/mkbootimg_args.txt"
 
+          # The apt-packaged /usr/bin/mkbootimg is broken (ModuleNotFoundError:
+          # No module named 'gki' -- its generate_gki_certificate import isn't
+          # satisfied by the Debian package layout). Use the one OrangeFox's
+          # own build already compiled as a self-contained "embedded python
+          # archive" (confirmed working -- it's the same binary that built the
+          # oversized vendor_boot.img moments earlier in this same job).
+          MKBOOTIMG_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/mkbootimg"
+
           python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
-            "$UNPACK" "$OUT"
+            "$UNPACK" "$OUT" "$MKBOOTIMG_BIN"
 
           ls -lh "$OUT"
           SIZE=$(stat -c%s "$OUT")
