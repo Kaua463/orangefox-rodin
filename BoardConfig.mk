@@ -116,6 +116,22 @@ TW_INCLUDE_EROFS := true
 TW_HAS_MTP := true
 TW_MTP_DEVICE := /dev/mtp_usb
 TW_NO_USB_STORAGE := true
+
+# Touch never worked in any custom recovery on this device (confirmed:
+# stock recovery's own dmesg shows zero touch driver activity too) --
+# the real drivers (goodix_core_rodin.ko / focaltech_touch_rodin.ko,
+# this device supports both vendor ICs; xiaomi_touch_rodin.ko;
+# scp.ko dependency) live only in vendor_dlkm, which vendor_boot's
+# static ramdisk never had a way to reach. This is OrangeFox's own
+# official mechanism for exactly that: mounts /vendor_dlkm (and
+# /vendor) at runtime, tries each listed module, cleanly unmounts
+# afterward either way, and falls back to HW GUI Control automatically
+# if none load. Confirmed as the standard approach via multiple real
+# device trees (including other Xiaomi/Dimensity ones) -- much safer
+# than statically baking these into the ramdisk (5th attempt did that
+# and bootlooped; root cause never confirmed since the device
+# auto-reboots on kernel panic before any log could be captured).
+TW_LOAD_VENDOR_MODULES := "scp.ko xiaomi_touch_rodin.ko goodix_core_rodin.ko focaltech_touch_rodin.ko"
 RECOVERY_SDCARD_ON_DATA := true
 BOARD_HAS_LARGE_FILESYSTEM := true
 TW_EXTRA_LANGUAGES :=

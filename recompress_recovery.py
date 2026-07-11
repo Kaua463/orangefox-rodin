@@ -115,14 +115,28 @@ not already present in vendor_boot's own module set: scp.ko (its own
 deps -- mtk_tinysys_ipi.ko, mtk_rpmsg_mbox.ko, mtk-mbox.ko -- were
 already there and already loading fine per dmesg).
 
-Fix: same surgical-cpio-patch approach as the verbose_abort shim --
-add the 4 missing .ko files (prebuilt/touch_modules/, pulled from
-vendor_dlkm_a.img) into the ramdisk, and insert their names into
-lib/modules/modules.load.recovery (right after mtk_tinysys_ipi.ko,
-their last already-present dependency) so init actually loads them.
-Both touch IC drivers get bundled and loaded; only the one matching
-this unit's real hardware will actually probe successfully, same
-pattern already proven safe for the panel driver variants.
+Fix attempted (5th, superseded): surgical-cpio-patch, same approach as
+the verbose_abort shim -- add the 4 missing .ko files into the ramdisk
+and auto-load them via modules.load.recovery. This bootlooped the
+device; root cause unconfirmed (kernel auto-reboots on panic before
+any log survives). scp.ko itself was cleared by disassembly (no
+request_firmware, just mtk_ipi/mtk_mbox calls against an
+already-bootloader-loaded coprocessor) but the actual touch IC drivers
+hitting real I2C/GPIO hardware in a way that isn't safely predictable
+offline remain a live suspect.
+
+6th attempt (current): don't bundle these into the static ramdisk at
+all. Discovered OrangeFox has an official mechanism for exactly this
+situation -- TW_LOAD_VENDOR_MODULES (BoardConfig.mk) -- which mounts
+/vendor_dlkm (and /vendor) at runtime, tries loading each named
+module via its own Modprobe-based loader, cleanly unmounts either way,
+and automatically falls back to HW GUI Control if none load. This is
+the standard, widely-used approach (confirmed via several real device
+trees, including other Xiaomi/Dimensity ones) rather than our
+improvised static bundling, and doesn't risk baking a bad module into
+the boot-critical ramdisk at all -- worst case it just doesn't load,
+same graceful-failure behavior already observed elsewhere in this
+device's module loading. See BoardConfig.mk for the actual config.
 """
 import sys
 import subprocess
@@ -130,9 +144,8 @@ import shlex
 import os
 import json
 
-(native_vendor_boot, stock_vendor_boot, out_img, unpack_bootimg_bin,
- mkbootimg_bin, avbtool_bin, fingerprint_file, shim_so, cpio_patch_script,
- scp_ko, xiaomi_touch_ko, goodix_ko, focaltech_ko) = sys.argv[1:14]
+native_vendor_boot, stock_vendor_boot, out_img, unpack_bootimg_bin, \
+    mkbootimg_bin, avbtool_bin, fingerprint_file, shim_so, cpio_patch_script = sys.argv[1:10]
 
 work_dir = os.path.dirname(out_img)
 native_unpack = os.path.join(work_dir, "native_unpack")
@@ -168,11 +181,10 @@ recovery_fixed = os.path.join(work_dir, "recovery.fixed.cpio")
 recovery_zst = os.path.join(work_dir, "recovery.zst")
 run(["lz4", "-d", "-f", recovery_lz4, recovery_raw])
 
-# 1b. Patch in the verbose_abort compat shim (4th attempt) AND the
-# missing touch driver modules (5th attempt). Read the current
-# init.recovery.service.rc and lib/modules/modules.load.recovery out
-# of the cpio, edit both in memory, then surgically patch just those
-# two files' content plus add the 5 new files via cpio_newc_patch.py.
+# 1b. Patch in the verbose_abort compat shim (4th attempt). Touch
+# driver loading is now handled by OrangeFox's own TW_LOAD_VENDOR_MODULES
+# mechanism at runtime (6th attempt, see BoardConfig.mk) instead of
+# being baked into this ramdisk.
 import importlib.util
 _spec = importlib.util.spec_from_file_location("cpio_newc_patch", cpio_patch_script)
 _cpio = importlib.util.module_from_spec(_spec)
@@ -192,28 +204,12 @@ new_service_rc = old_text.replace(
 service_rc_new_path = os.path.join(work_dir, "init.recovery.service.rc.new")
 open(service_rc_new_path, "w").write(new_service_rc)
 
-# NOTE (6th attempt): deliberately NOT editing modules.load.recovery
-# this time. Auto-loading all 4 at boot (5th attempt) bootlooped the
-# device -- root cause unconfirmed (scp.ko itself looks architecturally
-# safe per disassembly: no request_firmware, just mtk_ipi/mtk_mbox
-# calls against an already-bootloader-loaded coprocessor; more likely
-# one of the touch IC drivers hanging/crashing on real hardware I2C
-# probe in a way that isn't safely predictable offline). The .ko files
-# are still bundled here so they're available on-device, but loading
-# them is now a manual, one-at-a-time `insmod` step the user runs from
-# OrangeFox's own on-device Terminal AFTER a confirmed-stable boot --
-# isolates which module (if any) is actually the problem instead of
-# risking a repeat bootloop with zero diagnostic data.
 patch_spec = {
     "edits": [
         {"path": "init.recovery.service.rc", "new_content_file": service_rc_new_path},
     ],
     "adds": [
         {"path": "system/lib64/libverbose_abort_shim.so", "src_file": shim_so},
-        {"path": "lib/modules/scp.ko", "src_file": scp_ko},
-        {"path": "lib/modules/xiaomi_touch_rodin.ko", "src_file": xiaomi_touch_ko},
-        {"path": "lib/modules/goodix_core_rodin.ko", "src_file": goodix_ko},
-        {"path": "lib/modules/focaltech_touch_rodin.ko", "src_file": focaltech_ko},
     ],
 }
 patch_spec_path = os.path.join(work_dir, "cpio_patch_spec.json")

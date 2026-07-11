@@ -265,16 +265,11 @@ jobs:
           AVBTOOL_BIN="$GITHUB_WORKSPACE/OrangeFox/out/host/linux-x86/bin/avbtool"
           FINGERPRINT_FILE="$PRODUCT/build_fingerprint.txt"
 
-          TOUCH_MODULES="$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/prebuilt/touch_modules"
           python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
             "$PRODUCT/vendor_boot.img" "$STOCK" "$OUT" \
             unpack_bootimg "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE" \
             "$GITHUB_WORKSPACE/libverbose_abort_shim.so" \
-            "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/cpio_newc_patch.py" \
-            "$TOUCH_MODULES/scp.ko" \
-            "$TOUCH_MODULES/xiaomi_touch_rodin.ko" \
-            "$TOUCH_MODULES/goodix_core_rodin.ko" \
-            "$TOUCH_MODULES/focaltech_touch_rodin.ko"
+            "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/cpio_newc_patch.py"
 
           ls -lh "$OUT"
           SIZE=$(stat -c%s "$OUT")
