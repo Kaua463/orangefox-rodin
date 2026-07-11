@@ -182,6 +182,53 @@ jobs:
           fi
           ls -lh "$PRODUCT/vendor_boot.img"
 
+      # Diagnostic: the recovery binary crashes on-device with
+      # "CANNOT LINK EXECUTABLE ... cannot locate symbol
+      # _ZNSt3__122__libcpp_verbose_abortEPKcz referenced by libsysutils.so"
+      # -- confirmed system/bin/recovery and libtar.so both directly need
+      # libsysutils.so (DT_NEEDED), so it can't just be dropped. Soong may
+      # build multiple libc++.so variants (recovery/system/vendor/apex) with
+      # different hardening flags; find every libc++.so in the build output
+      # and check which ones (if any) actually export this symbol, plus
+      # confirm libsysutils.so's undefined reference to it.
+      - name: Diagnose libc++ verbose_abort symbol mismatch
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+          SYM="_ZNSt3__122__libcpp_verbose_abortEPKcz"
+
+          echo "=== every libc++.so under out/target/product/rodin ==="
+          find "$PRODUCT" -name "libc++.so" -exec ls -la {} \;
+
+          echo ""
+          echo "=== does each one EXPORT the symbol? ==="
+          find "$PRODUCT" -name "libc++.so" | while read -r f; do
+            echo "--- $f ---"
+            if nm -D "$f" 2>/dev/null | grep -q "$SYM"; then
+              echo "HAS symbol"
+            else
+              echo "MISSING symbol"
+            fi
+            nm -D "$f" 2>/dev/null | grep -i verbose_abort || echo "(no verbose_abort symbols at all)"
+          done
+
+          echo ""
+          echo "=== libsysutils.so instances + their undefined refs to the symbol ==="
+          find "$PRODUCT" -name "libsysutils.so" | while read -r f; do
+            echo "--- $f ---"
+            nm -D "$f" 2>/dev/null | grep "$SYM"
+          done
+
+          echo ""
+          echo "=== the recovery binary itself: does IT reference the symbol directly? ==="
+          find "$PRODUCT" -path "*/recovery/root/system/bin/recovery" -exec nm -D {} \; 2>/dev/null | grep -i verbose_abort || echo "(recovery binary itself: no direct reference)"
+
+          echo ""
+          echo "=== which libc++.so variants exist by content hash (dedup) ==="
+          find "$PRODUCT" -name "libc++.so" -exec sha256sum {} \; | sort | uniq -c -w64
+
       # The native `mka vendorbootimage` build (AOSP core Makefile's own
       # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) compiles the recovery
       # ramdisk correctly, but its OWN vendor_boot.img output has proven
