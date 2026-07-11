@@ -192,26 +192,21 @@ new_service_rc = old_text.replace(
 service_rc_new_path = os.path.join(work_dir, "init.recovery.service.rc.new")
 open(service_rc_new_path, "w").write(new_service_rc)
 
-modules_load = next(e for e in entries if e["name"] == b"lib/modules/modules.load.recovery")
-old_modules = modules_load["data"].decode()
-assert "mtk_tinysys_ipi.ko" in old_modules, \
-    "modules.load.recovery format changed, can't insert touch modules"
-new_modules = old_modules.replace(
-    "mtk_tinysys_ipi.ko\n",
-    "mtk_tinysys_ipi.ko\n"
-    "scp.ko\n"
-    "xiaomi_touch_rodin.ko\n"
-    "goodix_core_rodin.ko\n"
-    "focaltech_touch_rodin.ko\n",
-    1,
-)
-modules_load_new_path = os.path.join(work_dir, "modules.load.recovery.new")
-open(modules_load_new_path, "w").write(new_modules)
-
+# NOTE (6th attempt): deliberately NOT editing modules.load.recovery
+# this time. Auto-loading all 4 at boot (5th attempt) bootlooped the
+# device -- root cause unconfirmed (scp.ko itself looks architecturally
+# safe per disassembly: no request_firmware, just mtk_ipi/mtk_mbox
+# calls against an already-bootloader-loaded coprocessor; more likely
+# one of the touch IC drivers hanging/crashing on real hardware I2C
+# probe in a way that isn't safely predictable offline). The .ko files
+# are still bundled here so they're available on-device, but loading
+# them is now a manual, one-at-a-time `insmod` step the user runs from
+# OrangeFox's own on-device Terminal AFTER a confirmed-stable boot --
+# isolates which module (if any) is actually the problem instead of
+# risking a repeat bootloop with zero diagnostic data.
 patch_spec = {
     "edits": [
         {"path": "init.recovery.service.rc", "new_content_file": service_rc_new_path},
-        {"path": "lib/modules/modules.load.recovery", "new_content_file": modules_load_new_path},
     ],
     "adds": [
         {"path": "system/lib64/libverbose_abort_shim.so", "src_file": shim_so},
