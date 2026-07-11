@@ -65,6 +65,33 @@ gets concatenated is internally consistent. Bonus: platform compresses
 much better under zstd too (29.3MB lz4 -> 17.4MB zstd), so the combined
 total (~47.9MB) comfortably fits the ~66.7MB combined budget with zero
 content cuts to either fragment.
+
+4th attempt: the above fixed the boot hang -- confirmed via live dmesg
+on-device that the kernel, init, and adbd all boot successfully now.
+But the recovery UI never draws (frozen on the bootloader's last frame)
+because /system/bin/recovery crash-loops every ~5s: "CANNOT LINK
+EXECUTABLE ... cannot locate symbol
+_ZNSt3__122__libcpp_verbose_abortEPKcz referenced by
+/system/lib64/libsysutils.so". Confirmed via a CI diagnostic step that
+EVERY libc++.so in the whole build output (system/vendor/recovery/
+symbols/intermediates, deduplicated by content hash) is missing this
+symbol -- a genuine version-skew bug between this OrangeFox branch's
+pinned clang prebuilt (assumes a libc++ hardening ABI with
+__libcpp_verbose_abort) and its pinned external/libcxx source (predates
+that symbol's implementation). system/bin/recovery and libtar.so both
+directly need libsysutils.so (DT_NEEDED), so it can't be dropped.
+
+Fix: rather than patch the synced AOSP/OrangeFox source tree, build a
+tiny standalone shim (verbose_abort_shim.cpp, compiled with the Android
+NDK, independent of the broken in-tree toolchain/libcxx pairing) that
+provides the missing symbol as a plain abort() call, and surgically
+patch it into the recovery ramdisk: add it as a new file
+(cpio_newc_patch.py edits the newc cpio in place, byte-for-byte
+untouched except the one new file and one edited line -- no
+extract/repack risk to the other ~4200 files' permissions/ownership),
+and add `setenv LD_PRELOAD /system/lib64/libverbose_abort_shim.so` to
+the 'recovery' service in init.recovery.service.rc so the dynamic
+linker resolves libsysutils.so's undefined reference against it.
 """
 import sys
 import subprocess
@@ -72,7 +99,7 @@ import shlex
 import os
 
 native_vendor_boot, stock_vendor_boot, out_img, unpack_bootimg_bin, \
-    mkbootimg_bin, avbtool_bin, fingerprint_file = sys.argv[1:8]
+    mkbootimg_bin, avbtool_bin, fingerprint_file, shim_so, cpio_patch_script = sys.argv[1:10]
 
 work_dir = os.path.dirname(out_img)
 native_unpack = os.path.join(work_dir, "native_unpack")
@@ -104,13 +131,45 @@ for name in os.listdir(native_unpack):
 assert recovery_lz4 is not None, "could not find the lz4 recovery fragment in the native build output"
 
 recovery_raw = os.path.join(work_dir, "recovery.raw.cpio")
+recovery_fixed = os.path.join(work_dir, "recovery.fixed.cpio")
 recovery_zst = os.path.join(work_dir, "recovery.zst")
 run(["lz4", "-d", "-f", recovery_lz4, recovery_raw])
+
+# 1b. Patch in the verbose_abort compat shim (see verbose_abort_shim.cpp
+# docstring above -- 4th attempt). Read the current
+# init.recovery.service.rc out of the cpio, insert a setenv line into
+# the 'recovery' service block, then surgically patch that one file's
+# content plus add the new shim .so via cpio_newc_patch.py.
+import importlib.util
+_spec = importlib.util.spec_from_file_location("cpio_newc_patch", cpio_patch_script)
+_cpio = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_cpio)
+entries, _ = _cpio.read_entries(open(recovery_raw, "rb").read())
+service_rc = next(e for e in entries if e["name"] == b"init.recovery.service.rc")
+old_text = service_rc["data"].decode()
+assert "service recovery /system/bin/recovery" in old_text, \
+    "init.recovery.service.rc format changed, can't inject LD_PRELOAD"
+new_text = old_text.replace(
+    "service recovery /system/bin/recovery",
+    "service recovery /system/bin/recovery\n"
+    "    setenv LD_PRELOAD /system/lib64/libverbose_abort_shim.so",
+    1,
+)
+service_rc_new_path = os.path.join(work_dir, "init.recovery.service.rc.new")
+open(service_rc_new_path, "w").write(new_text)
+
+run([
+    sys.executable, cpio_patch_script,
+    recovery_raw, recovery_fixed,
+    "init.recovery.service.rc", service_rc_new_path,
+    "system/lib64/libverbose_abort_shim.so", shim_so,
+])
+
 # -19 with an explicit --zstd=wlog=23 (8MiB window): the default window for
 # this input size is already 8MiB, but pin it explicitly so this stays
 # under lib/decompress_unzstd.c's window-size rejection check regardless
 # of zstd CLI version drift.
-run(["zstd", "-19", "--zstd=wlog=23", "-T0", "-f", recovery_raw, "-o", recovery_zst])
+run(["zstd", "-19", "--zstd=wlog=23", "-T0", "-f", recovery_fixed, "-o", recovery_zst])
 before = os.path.getsize(recovery_lz4)
 after = os.path.getsize(recovery_zst)
 print(f"recovery fragment: {before:,} bytes (lz4) -> {after:,} bytes (zstd), "

@@ -182,52 +182,37 @@ jobs:
           fi
           ls -lh "$PRODUCT/vendor_boot.img"
 
-      # Diagnostic: the recovery binary crashes on-device with
-      # "CANNOT LINK EXECUTABLE ... cannot locate symbol
-      # _ZNSt3__122__libcpp_verbose_abortEPKcz referenced by libsysutils.so"
-      # -- confirmed system/bin/recovery and libtar.so both directly need
-      # libsysutils.so (DT_NEEDED), so it can't just be dropped. Soong may
-      # build multiple libc++.so variants (recovery/system/vendor/apex) with
-      # different hardening flags; find every libc++.so in the build output
-      # and check which ones (if any) actually export this symbol, plus
-      # confirm libsysutils.so's undefined reference to it.
-      - name: Diagnose libc++ verbose_abort symbol mismatch
+      # The recovery binary crash-loops on-device with "CANNOT LINK
+      # EXECUTABLE ... cannot locate symbol
+      # _ZNSt3__122__libcpp_verbose_abortEPKcz referenced by
+      # libsysutils.so" -- confirmed (diagnostic CI run) that EVERY
+      # libc++.so anywhere in this build's output is missing that symbol;
+      # a genuine version-skew bug between this branch's pinned clang
+      # prebuilt and its pinned external/libcxx source, not something
+      # fixable by picking a different variant. Build a tiny standalone
+      # shim providing the missing symbol (plain abort(), see
+      # verbose_abort_shim.cpp), using a fresh NDK independent of the
+      # broken in-tree toolchain/libcxx pairing -- and independent of the
+      # main `mka` build entirely, so a mistake here can't break it.
+      - name: Build verbose_abort compat shim (NDK, standalone)
         if: always()
         shell: bash
         run: |
-          set -uo pipefail
-          PRODUCT="$GITHUB_WORKSPACE/OrangeFox/out/target/product/rodin"
+          set -euo pipefail
+          NDK_VER="r27c"
+          curl -L "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip" -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /tmp/ndk
+          NDK_CLANGXX="/tmp/ndk/android-ndk-${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+
+          "$NDK_CLANGXX" -shared -fPIC -fno-exceptions -fno-rtti -nostdlib++ \
+            -o "$GITHUB_WORKSPACE/libverbose_abort_shim.so" \
+            "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/verbose_abort_shim.cpp"
+
+          echo "=== confirming the shim exports the exact target symbol ==="
           SYM="_ZNSt3__122__libcpp_verbose_abortEPKcz"
-
-          echo "=== every libc++.so under out/target/product/rodin ==="
-          find "$PRODUCT" -name "libc++.so" -exec ls -la {} \;
-
-          echo ""
-          echo "=== does each one EXPORT the symbol? ==="
-          find "$PRODUCT" -name "libc++.so" | while read -r f; do
-            echo "--- $f ---"
-            if nm -D "$f" 2>/dev/null | grep -q "$SYM"; then
-              echo "HAS symbol"
-            else
-              echo "MISSING symbol"
-            fi
-            nm -D "$f" 2>/dev/null | grep -i verbose_abort || echo "(no verbose_abort symbols at all)"
-          done
-
-          echo ""
-          echo "=== libsysutils.so instances + their undefined refs to the symbol ==="
-          find "$PRODUCT" -name "libsysutils.so" | while read -r f; do
-            echo "--- $f ---"
-            nm -D "$f" 2>/dev/null | grep "$SYM"
-          done
-
-          echo ""
-          echo "=== the recovery binary itself: does IT reference the symbol directly? ==="
-          find "$PRODUCT" -path "*/recovery/root/system/bin/recovery" -exec nm -D {} \; 2>/dev/null | grep -i verbose_abort || echo "(recovery binary itself: no direct reference)"
-
-          echo ""
-          echo "=== which libc++.so variants exist by content hash (dedup) ==="
-          find "$PRODUCT" -name "libc++.so" -exec sha256sum {} \; | sort | uniq -c -w64
+          "/tmp/ndk/android-ndk-${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D \
+            "$GITHUB_WORKSPACE/libverbose_abort_shim.so" | grep "$SYM"
+          ls -lh "$GITHUB_WORKSPACE/libverbose_abort_shim.so"
 
       # The native `mka vendorbootimage` build (AOSP core Makefile's own
       # BOARD_VENDOR_RAMDISK_FRAGMENTS assembly) compiles the recovery
@@ -282,7 +267,9 @@ jobs:
 
           python3 "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/recompress_recovery.py" \
             "$PRODUCT/vendor_boot.img" "$STOCK" "$OUT" \
-            unpack_bootimg "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE"
+            unpack_bootimg "$MKBOOTIMG_BIN" "$AVBTOOL_BIN" "$FINGERPRINT_FILE" \
+            "$GITHUB_WORKSPACE/libverbose_abort_shim.so" \
+            "$GITHUB_WORKSPACE/OrangeFox/device/xiaomi/rodin/cpio_newc_patch.py"
 
           ls -lh "$OUT"
           SIZE=$(stat -c%s "$OUT")
