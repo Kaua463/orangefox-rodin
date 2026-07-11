@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
-"""Surgically patch a newc-format cpio archive: modify one text file's
-content in place and insert one new file, leaving every other entry
-byte-for-byte untouched (same metadata, same order). Much lower risk
-than a full extract-modify-repack cycle (no root/fakeroot needed, no
-chance of losing permissions/ownership on the 4000+ files we don't
-touch).
+"""Surgically patch a newc-format cpio archive: edit one or more text
+files' content in place and insert one or more new files, leaving
+every other entry byte-for-byte untouched (same metadata, same order).
+Much lower risk than a full extract-modify-repack cycle (no root/
+fakeroot needed, no chance of losing permissions/ownership on the
+4000+ files we don't touch).
+
+Usage: cpio_newc_patch.py <in.cpio> <out.cpio> <spec.json>
+
+spec.json:
+{
+  "edits": [{"path": "init.recovery.service.rc", "new_content_file": "/tmp/new.rc"}, ...],
+  "adds":  [{"path": "system/lib64/libfoo.so", "src_file": "/tmp/libfoo.so"}, ...]
+}
+Each "adds" entry copies mode/uid/gid from a sibling file already in
+the same cpio directory (matched by shared file extension), falling
+back to 0644/root:root if no sibling is found.
 """
 import sys
+import json
 
 HEADER_MAGIC = b"070701"
 HEADER_LEN = 110  # 6 magic + 13*8 hex fields
@@ -63,42 +75,51 @@ def build_entry(name, data, mode, uid=0, gid=0, nlink=1, mtime=0,
     return out
 
 
+def sibling_meta(entries, new_path):
+    """Find an existing entry in the same directory with the same
+    extension to copy mode/uid/gid from; fall back to 0644/root/root."""
+    new_dir = "/".join(new_path.split("/")[:-1]).encode()
+    ext = new_path.rsplit(".", 1)[-1] if "." in new_path else ""
+    for e in entries:
+        name = e["name"]
+        if name.startswith(new_dir + b"/") and ext and name.endswith(b"." + ext.encode()):
+            return e["mode"], e["uid"], e["gid"]
+    return 0o100644, 0, 0
+
+
 def main():
-    in_path, out_path, edit_name, edit_new_content, new_file_name, new_file_path = sys.argv[1:7]
+    in_path, out_path, spec_path = sys.argv[1:4]
+    spec = json.load(open(spec_path))
     data = open(in_path, "rb").read()
     entries, consumed = read_entries(data)
     trailing_padding = data[consumed:]  # zero-padding to block boundary after TRAILER
 
-    edit_name_b = edit_name.encode()
-    new_file_name_b = new_file_name.encode()
-    new_file_data = open(new_file_path, "rb").read()
+    edits = {e["path"].encode(): e["new_content_file"] for e in spec.get("edits", [])}
+    adds = spec.get("adds", [])
 
-    edited = False
+    edited_paths = set()
     out_chunks = []
-    # find a sibling .so entry in the same dir as the new file to copy mode/uid/gid from
-    new_dir = "/".join(new_file_name.split("/")[:-1]).encode()
-    sibling_mode, sibling_uid, sibling_gid = 0o100644, 0, 0
-    for e in entries:
-        if e["name"].startswith(new_dir + b"/") and e["name"].endswith(b".so"):
-            sibling_mode, sibling_uid, sibling_gid = e["mode"], e["uid"], e["gid"]
-            break
 
     for e in entries:
         if e["name"] == b"TRAILER!!!":
-            # insert our new file entry right before TRAILER
-            out_chunks.append(build_entry(
-                new_file_name_b, new_file_data,
-                mode=sibling_mode, uid=sibling_uid, gid=sibling_gid,
-            ))
+            for add in adds:
+                mode, uid, gid = sibling_meta(entries, add["path"])
+                new_data = open(add["src_file"], "rb").read()
+                out_chunks.append(build_entry(
+                    add["path"].encode(), new_data, mode=mode, uid=uid, gid=gid,
+                ))
+                print(f"added {add['path']}: {len(new_data)} bytes "
+                      f"(mode={oct(mode)} uid={uid} gid={gid})")
             out_chunks.append(build_entry(e["name"], e["data"], mode=e["mode"],
                                            uid=e["uid"], gid=e["gid"], nlink=e["nlink"]))
             continue
-        if e["name"] == edit_name_b:
-            new_content = open(edit_new_content, "rb").read()
+        if e["name"] in edits:
+            new_content = open(edits[e["name"]], "rb").read()
             out_chunks.append(build_entry(e["name"], new_content, mode=e["mode"],
                                            uid=e["uid"], gid=e["gid"], nlink=e["nlink"],
                                            mtime=e["mtime"], ino=e["ino"]))
-            edited = True
+            edited_paths.add(e["name"])
+            print(f"edited {e['name'].decode()}: {len(new_content)} bytes")
             continue
         out_chunks.append(build_entry(e["name"], e["data"], mode=e["mode"],
                                        uid=e["uid"], gid=e["gid"], nlink=e["nlink"],
@@ -106,10 +127,13 @@ def main():
                                        devmajor=e["devmajor"], devminor=e["devminor"],
                                        rdevmajor=e["rdevmajor"], rdevminor=e["rdevminor"]))
 
-    assert edited, f"never found entry to edit: {edit_name}"
+    missing = set(edits) - edited_paths
+    assert not missing, f"never found entries to edit: {missing}"
+
     result = b"".join(out_chunks) + trailing_padding
     open(out_path, "wb").write(result)
-    print(f"wrote {out_path}: {len(result)} bytes, {len(entries)+1} entries (was {len(entries)})")
+    print(f"wrote {out_path}: {len(result)} bytes, "
+          f"{len(entries) + len(adds)} entries (was {len(entries)})")
 
 
 if __name__ == "__main__":

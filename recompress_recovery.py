@@ -92,14 +92,47 @@ extract/repack risk to the other ~4200 files' permissions/ownership),
 and add `setenv LD_PRELOAD /system/lib64/libverbose_abort_shim.so` to
 the 'recovery' service in init.recovery.service.rc so the dynamic
 linker resolves libsysutils.so's undefined reference against it.
+
+5th attempt: the above got OrangeFox's UI actually drawing on-screen
+for the first time (huge win -- confirms the verbose_abort fix
+worked), but the touchscreen doesn't respond at all, leaving the
+lock/decrypt swipe screen unreachable (worked around live via
+OrangeFox's "HW GUI Control" hold-both-volume-keys-3s feature,
+see wiki.orangefox.tech/en/guides/recovery_no_touch, to confirm
+recovery itself is fine and this is purely a touch problem).
+dmesg (both our OrangeFox build AND stock recovery) shows ZERO
+touchscreen driver activity, and neither vendor_boot's own
+lib/modules nor modules.load/modules.load.recovery contain any
+touch-related .ko at all. Found the real driver modules
+(goodix_core_rodin.ko, focaltech_touch_rodin.ko, xiaomi_touch_rodin.ko
+-- this device supports both vendor ICs, like the display panel
+situation) inside vendor_dlkm_a.img, a separate partition recovery
+never mounts. So touch was never wired into the recovery ramdisk at
+all -- not something this fix broke, an existing gap for any custom
+recovery on this device that just never got tested with a real touch
+gesture before now. Their modules.dep only needed one more dependency
+not already present in vendor_boot's own module set: scp.ko (its own
+deps -- mtk_tinysys_ipi.ko, mtk_rpmsg_mbox.ko, mtk-mbox.ko -- were
+already there and already loading fine per dmesg).
+
+Fix: same surgical-cpio-patch approach as the verbose_abort shim --
+add the 4 missing .ko files (prebuilt/touch_modules/, pulled from
+vendor_dlkm_a.img) into the ramdisk, and insert their names into
+lib/modules/modules.load.recovery (right after mtk_tinysys_ipi.ko,
+their last already-present dependency) so init actually loads them.
+Both touch IC drivers get bundled and loaded; only the one matching
+this unit's real hardware will actually probe successfully, same
+pattern already proven safe for the panel driver variants.
 """
 import sys
 import subprocess
 import shlex
 import os
+import json
 
-native_vendor_boot, stock_vendor_boot, out_img, unpack_bootimg_bin, \
-    mkbootimg_bin, avbtool_bin, fingerprint_file, shim_so, cpio_patch_script = sys.argv[1:10]
+(native_vendor_boot, stock_vendor_boot, out_img, unpack_bootimg_bin,
+ mkbootimg_bin, avbtool_bin, fingerprint_file, shim_so, cpio_patch_script,
+ scp_ko, xiaomi_touch_ko, goodix_ko, focaltech_ko) = sys.argv[1:14]
 
 work_dir = os.path.dirname(out_img)
 native_unpack = os.path.join(work_dir, "native_unpack")
@@ -135,35 +168,63 @@ recovery_fixed = os.path.join(work_dir, "recovery.fixed.cpio")
 recovery_zst = os.path.join(work_dir, "recovery.zst")
 run(["lz4", "-d", "-f", recovery_lz4, recovery_raw])
 
-# 1b. Patch in the verbose_abort compat shim (see verbose_abort_shim.cpp
-# docstring above -- 4th attempt). Read the current
-# init.recovery.service.rc out of the cpio, insert a setenv line into
-# the 'recovery' service block, then surgically patch that one file's
-# content plus add the new shim .so via cpio_newc_patch.py.
+# 1b. Patch in the verbose_abort compat shim (4th attempt) AND the
+# missing touch driver modules (5th attempt). Read the current
+# init.recovery.service.rc and lib/modules/modules.load.recovery out
+# of the cpio, edit both in memory, then surgically patch just those
+# two files' content plus add the 5 new files via cpio_newc_patch.py.
 import importlib.util
 _spec = importlib.util.spec_from_file_location("cpio_newc_patch", cpio_patch_script)
 _cpio = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_cpio)
 entries, _ = _cpio.read_entries(open(recovery_raw, "rb").read())
+
 service_rc = next(e for e in entries if e["name"] == b"init.recovery.service.rc")
 old_text = service_rc["data"].decode()
 assert "service recovery /system/bin/recovery" in old_text, \
     "init.recovery.service.rc format changed, can't inject LD_PRELOAD"
-new_text = old_text.replace(
+new_service_rc = old_text.replace(
     "service recovery /system/bin/recovery",
     "service recovery /system/bin/recovery\n"
     "    setenv LD_PRELOAD /system/lib64/libverbose_abort_shim.so",
     1,
 )
 service_rc_new_path = os.path.join(work_dir, "init.recovery.service.rc.new")
-open(service_rc_new_path, "w").write(new_text)
+open(service_rc_new_path, "w").write(new_service_rc)
 
-run([
-    sys.executable, cpio_patch_script,
-    recovery_raw, recovery_fixed,
-    "init.recovery.service.rc", service_rc_new_path,
-    "system/lib64/libverbose_abort_shim.so", shim_so,
-])
+modules_load = next(e for e in entries if e["name"] == b"lib/modules/modules.load.recovery")
+old_modules = modules_load["data"].decode()
+assert "mtk_tinysys_ipi.ko" in old_modules, \
+    "modules.load.recovery format changed, can't insert touch modules"
+new_modules = old_modules.replace(
+    "mtk_tinysys_ipi.ko\n",
+    "mtk_tinysys_ipi.ko\n"
+    "scp.ko\n"
+    "xiaomi_touch_rodin.ko\n"
+    "goodix_core_rodin.ko\n"
+    "focaltech_touch_rodin.ko\n",
+    1,
+)
+modules_load_new_path = os.path.join(work_dir, "modules.load.recovery.new")
+open(modules_load_new_path, "w").write(new_modules)
+
+patch_spec = {
+    "edits": [
+        {"path": "init.recovery.service.rc", "new_content_file": service_rc_new_path},
+        {"path": "lib/modules/modules.load.recovery", "new_content_file": modules_load_new_path},
+    ],
+    "adds": [
+        {"path": "system/lib64/libverbose_abort_shim.so", "src_file": shim_so},
+        {"path": "lib/modules/scp.ko", "src_file": scp_ko},
+        {"path": "lib/modules/xiaomi_touch_rodin.ko", "src_file": xiaomi_touch_ko},
+        {"path": "lib/modules/goodix_core_rodin.ko", "src_file": goodix_ko},
+        {"path": "lib/modules/focaltech_touch_rodin.ko", "src_file": focaltech_ko},
+    ],
+}
+patch_spec_path = os.path.join(work_dir, "cpio_patch_spec.json")
+json.dump(patch_spec, open(patch_spec_path, "w"))
+
+run([sys.executable, cpio_patch_script, recovery_raw, recovery_fixed, patch_spec_path])
 
 # -19 with an explicit --zstd=wlog=23 (8MiB window): the default window for
 # this input size is already 8MiB, but pin it explicitly so this stays
